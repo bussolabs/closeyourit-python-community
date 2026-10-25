@@ -1,0 +1,10 @@
+{
+  "replay_session_id": "session-contract-1",
+  "seq": 0,
+  "started_at": "2026-07-13T14:00:00Z",
+  "events": [
+    { "type": 2, "timestamp": 1783951200000, "data": { "node": { "type": 0, "childNodes": [] } } }
+  ],
+  "environment": "production",
+  "path": "/pricing"
+}

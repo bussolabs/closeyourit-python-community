@@ -1,0 +1,8 @@
+{
+  "event_id": "12345678123442348234123456789abc",
+  "timestamp": "2026-07-13T14:00:00Z",
+  "platform": "python",
+  "level": "error",
+  "environment": "production",
+  "sdk": { "name": "closeyourit-python", "version": "0.1.0" }
+}

@@ -1,0 +1,112 @@
+{
+  "contract": "closeyourit-jobs",
+  "version": 1,
+  "schema": "schema.json",
+  "fixtures": [
+    {
+      "path": "fixtures/valid/scheduled-success.json",
+      "definition": "job_context",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/unknown-timing.json",
+      "definition": "job_context",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/retry.json",
+      "definition": "job_context",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/duration-metric.json",
+      "definition": "job_context",
+      "valid": true
+    },
+    {
+      "path": "fixtures/valid/zero-skew.json",
+      "definition": "job_context",
+      "valid": true
+    },
+    {
+      "path": "fixtures/invalid/negative-wait.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/zero-attempt.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/negative-retries.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/unknown-field.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/ambiguous-time.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/non-utc-time.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/retry-terminal.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/unknown-terminal.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/future-version.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/control-in-name.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/intentional-delay-as-wait.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/invented-wait.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/unrepresentable-duration.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/incorrect-scheduled-delay.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/unmarked-clock-skew.json",
+      "definition": "job_context",
+      "valid": false
+    },
+    {
+      "path": "fixtures/invalid/boolean-attempt.json",
+      "definition": "job_context",
+      "valid": false
+    }
+  ]
+}

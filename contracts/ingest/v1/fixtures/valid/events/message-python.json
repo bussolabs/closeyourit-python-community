@@ -1,0 +1,11 @@
+{
+  "event_id": "12345678123442348234123456789abc",
+  "timestamp": "2026-07-13T14:00:00Z",
+  "platform": "python",
+  "level": "warning",
+  "environment": "production",
+  "release": "v0.1.0",
+  "contexts": { "runtime": { "name": "python", "version": "__PYTHON_VERSION__" } },
+  "sdk": { "name": "closeyourit-python", "version": "0.1.0" },
+  "message": { "formatted": "cache miss" }
+}

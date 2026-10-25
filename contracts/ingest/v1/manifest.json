@@ -1,0 +1,23 @@
+{
+  "contract": "closeyourit-ingest",
+  "version": 1,
+  "schema": "schema.json",
+  "fixtures": [
+    { "path": "fixtures/valid/events/exception-python.json", "definition": "event", "valid": true },
+    { "path": "fixtures/valid/events/message-python.json", "definition": "event", "valid": true },
+    { "path": "fixtures/valid/logs/single-python.json", "definition": "log", "valid": true },
+    { "path": "fixtures/valid/metrics/slow-method-python.json", "definition": "slow_method", "valid": true },
+    { "path": "fixtures/valid/metrics/slow-query.json", "definition": "slow_query", "valid": true },
+    { "path": "fixtures/valid/metrics/performance-issue.json", "definition": "performance_issue", "valid": true },
+    { "path": "fixtures/valid/pageviews/single-browser.json", "definition": "pageview", "valid": true },
+    { "path": "fixtures/valid/replays/single-browser.json", "definition": "replay", "valid": true },
+    { "path": "fixtures/invalid/event-without-message-or-exception.json", "definition": "event", "valid": false },
+    { "path": "fixtures/invalid/log-with-blank-message.json", "definition": "log", "valid": false },
+    { "path": "fixtures/invalid/metric-with-blank-label.json", "definition": "slow_method", "valid": false },
+    { "path": "fixtures/invalid/metric-with-unknown-kind.json", "definition": "metric", "valid": false },
+    { "path": "fixtures/invalid/pageview-with-query-in-path.json", "definition": "pageview", "valid": false },
+    { "path": "fixtures/invalid/replay-without-events.json", "definition": "replay", "valid": false }
+  ],
+  "http_cases": "fixtures/http/cases.json",
+  "auth_cases": "fixtures/http/auth-cases.json"
+}

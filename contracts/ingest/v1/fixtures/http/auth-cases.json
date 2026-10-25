@@ -1,0 +1,12 @@
+[
+  { "id": "bearer-events", "channel": "events", "credential": "bearer", "endpoint": "/api/v1/projects/{project_id}/events", "status": 202 },
+  { "id": "bearer-logs", "channel": "logs", "credential": "bearer", "endpoint": "/api/v1/projects/{project_id}/logs", "status": 202 },
+  { "id": "bearer-metrics", "channel": "metrics", "credential": "bearer", "endpoint": "/api/v1/projects/{project_id}/metrics", "status": 202 },
+  { "id": "bearer-pageviews", "channel": "pageviews", "credential": "bearer", "endpoint": "/api/v1/projects/{project_id}/pageviews", "status": 202 },
+  { "id": "bearer-replays", "channel": "replays", "credential": "bearer", "endpoint": "/api/v1/projects/{project_id}/replays", "status": 202 },
+  { "id": "public-store", "channel": "events", "credential": "public_dsn", "endpoint": "/api/{project_id}/store", "status": 200 },
+  { "id": "public-envelope", "channel": "events", "credential": "public_dsn", "endpoint": "/api/{project_id}/envelope", "status": 200 },
+  { "id": "public-pageviews-rejected", "channel": "pageviews", "credential": "public_dsn", "endpoint": "/api/v1/projects/{project_id}/pageviews", "status": 401 },
+  { "id": "gateway-pageviews", "channel": "pageviews", "credential": "trusted_gateway", "endpoint": "/application-defined/closeyourit/pageviews", "forward_to": "/api/v1/projects/{project_id}/pageviews", "status": 202 },
+  { "id": "gateway-replays", "channel": "replays", "credential": "trusted_gateway", "endpoint": "/application-defined/closeyourit/replays", "forward_to": "/api/v1/projects/{project_id}/replays", "status": 202 }
+]

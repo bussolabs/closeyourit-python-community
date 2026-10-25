@@ -1,0 +1,126 @@
+# Public CI of bussolabs/closeyourit-python-community (CYRA-914 B8). It runs on GitHub-hosted
+# runners: a fork's pull request must never reach the private pool. Releases are cut from the
+# maintainer repository, so this workflow only checks and never publishes.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - name: Create virtual environment
+        run: mise exec -- python -m venv .venv
+      - name: Install development dependencies
+        run: |
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -e ".[dev]"
+          .venv/bin/python -m pip check
+      - name: Lint
+        run: .venv/bin/ruff check .
+      - name: Format
+        run: .venv/bin/ruff format --check .
+      - name: Type check
+        run: .venv/bin/mypy
+      - name: Test
+        run: .venv/bin/python -m pytest
+      - name: Build distributions
+        run: .venv/bin/python -m build
+      - name: Validate distributions
+        run: .venv/bin/python -m twine check dist/*
+      - name: Smoke-test wheel
+        run: |
+          .venv/bin/python -m venv .smoke-venv
+          .smoke-venv/bin/python -m pip install dist/*.whl
+          .smoke-venv/bin/python -c "import closeyourit; print(closeyourit.__version__)"
+
+  compatibility:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12', '3.13', '3.14']
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - name: Create virtual environment with Python ${{ matrix.python }}
+        run: mise exec python@${{ matrix.python }} -- python -m venv .venv
+      - name: Install package and test dependencies
+        run: |
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -e ".[dev]"
+          .venv/bin/python -m pip check
+      - name: Test on Python ${{ matrix.python }}
+        run: .venv/bin/python -m pytest
+
+  django-queries:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: '3.11'
+            django: '4.2.30'
+          - python: '3.14'
+            django: '5.2.17'
+          - python: '3.14'
+            django: '6.0.8'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - name: Create isolated framework environment
+        run: mise exec python@${{ matrix.python }} -- python -m venv .venv
+      - name: Install packaged SDK and pinned Django
+        run: |
+          .venv/bin/python -m pip install ".[dev]" "Django==${{ matrix.django }}"
+          .venv/bin/python -m pip check
+      - name: Exercise real Django query lifecycle
+        run: .venv/bin/python -m pytest tests/test_django_queries.py tests/test_django_integration.py --no-cov
+
+  asgi-frameworks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - python: '3.11'
+            fastapi: '0.115.0'
+            starlette: '0.38.6'
+          - python: '3.14'
+            fastapi: '0.142.2'
+            starlette: '1.7.0'
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: jdx/mise-action@e6a8b3978addb5a52f2b4cd9d91eafa7f0ab959d # v4.2.0
+      - name: Create isolated framework environment
+        run: mise exec python@${{ matrix.python }} -- python -m venv .venv
+      - name: Install packaged SDK and pinned frameworks
+        run: |
+          .venv/bin/python -m pip install ".[dev]" "FastAPI==${{ matrix.fastapi }}" "Starlette==${{ matrix.starlette }}"
+          .venv/bin/python -m pip check
+      - name: Exercise real ASGI framework lifecycle
+        run: .venv/bin/python -m pytest tests/test_starlette_integration.py tests/test_asgi.py --no-cov

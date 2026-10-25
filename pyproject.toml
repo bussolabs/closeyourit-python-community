@@ -1,0 +1,116 @@
+[build-system]
+requires = ["hatchling >= 1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "closeyourit"
+dynamic = ["version"]
+description = "Official Python SDK for CloseYourIt observability"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Bussolabs" }]
+keywords = ["closeyourit", "observability", "errors", "logging", "metrics"]
+classifiers = [
+  "Development Status :: 2 - Pre-Alpha",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+celery = ["celery>=5.5,<6"]
+django = ["Django>=4.2"]
+flask = ["Flask>=3.0"]
+fastapi = ["FastAPI>=0.115"]
+starlette = ["Starlette>=0.38.6"]
+httpx = ["httpx>=0.27"]
+requests = ["requests>=2.31"]
+sqlalchemy = ["SQLAlchemy[asyncio]>=2.0"]
+dev = [
+  "aiosqlite>=0.20",
+  "Django>=4.2",
+  "Flask>=3.0",
+  "FastAPI>=0.115",
+  "build>=1.3",
+  "celery[redis]>=5.5,<6",
+  "httpx>=0.27",
+  "jsonschema[format]>=4.26,<5",
+  "mypy>=1.18",
+  "pytest>=8.4",
+  "pytest-cov>=6.2",
+  "pytest-asyncio>=1.0",
+  "PyYAML>=6.0",
+  "requests>=2.31",
+  "ruff>=0.14",
+  "SQLAlchemy[asyncio]>=2.0",
+  "twine>=6.2",
+  "types-jsonschema>=4.26",
+  "types-PyYAML>=6.0",
+  "types-requests>=2.31",
+]
+
+[project.urls]
+Repository = "https://github.com/bussolabs/closeyourit-python-community"
+Documentation = "https://closeyour.it/docs/sdk-python"
+
+[tool.hatch.version]
+path = "src/closeyourit/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/closeyourit"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+  "/.firecrawl",
+  "/.mypy_cache",
+  "/.pytest_cache",
+  "/.ruff_cache",
+  "/.smoke-venv",
+  "/.smoke-*-venv",
+  "/.venv",
+  "/build",
+  "/dist",
+]
+skip-excluded-dirs = true
+
+[tool.pytest.ini_options]
+addopts = [
+  "--strict-config",
+  "--strict-markers",
+  "--cov=closeyourit",
+  "--cov-branch",
+  "--cov-report=term-missing",
+  "--cov-fail-under=90",
+]
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["closeyourit"]
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "RUF", "SIM", "UP"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+files = ["src", "scripts", "tests"]
+mypy_path = "src"

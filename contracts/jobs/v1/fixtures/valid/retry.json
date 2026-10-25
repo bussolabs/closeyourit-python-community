@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "framework": "celery",
+  "name": "ExampleJob",
+  "queue": "default",
+  "job_id": "example-job",
+  "attempt": 2,
+  "retry_count": 1,
+  "enqueued_at": "2026-10-04T12:00:00Z",
+  "scheduled_at": "2026-10-04T12:10:00Z",
+  "started_at": "2026-10-04T12:10:30Z",
+  "duration_ms": 12.5,
+  "queue_wait_ms": 30000,
+  "scheduled_delay_ms": 600000,
+  "attempt_outcome": "retry",
+  "terminal": false
+}

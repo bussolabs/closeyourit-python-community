@@ -1,0 +1,11 @@
+{
+  "event_id": "12345678123442348234123456789abc",
+  "timestamp": "2026-07-13T14:00:00Z",
+  "level": "info",
+  "message": "order charged",
+  "logger": "billing",
+  "attributes": { "order_id": 7 },
+  "environment": "production",
+  "release": "v0.1.0",
+  "sdk": { "name": "closeyourit-python", "version": "0.1.0" }
+}

@@ -1,0 +1,11 @@
+{
+  "event_id": "12345678-1234-4234-8234-123456789abc",
+  "hostname": "www.example.test",
+  "path": "/pricing",
+  "referrer": "https://www.google.com/search?q=closeyourit",
+  "utm_source": "newsletter",
+  "utm_medium": "email",
+  "screen_width": 1440,
+  "occurred_at": "2026-07-13T14:00:00Z",
+  "environment": "production"
+}

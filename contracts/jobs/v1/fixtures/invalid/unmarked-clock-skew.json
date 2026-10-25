@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "framework": "active_job",
+  "name": "ExampleJob",
+  "queue": "default",
+  "job_id": "example-job",
+  "attempt": 1,
+  "retry_count": 0,
+  "enqueued_at": "2026-10-04T12:00:00Z",
+  "scheduled_at": "2026-10-04T12:10:00Z",
+  "started_at": "2026-10-04T11:59:59Z",
+  "duration_ms": 12.5,
+  "queue_wait_ms": 0,
+  "scheduled_delay_ms": 600000,
+  "attempt_outcome": "success",
+  "terminal": true,
+  "clock_skew": false
+}

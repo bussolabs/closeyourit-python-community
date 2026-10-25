@@ -1,0 +1,14 @@
+[
+  { "id": "accepted", "status": 202, "retry": false, "terminal": "accepted" },
+  { "id": "queued-gateway", "status": 202, "headers": { "X-CloseYourIt-Queued": "true" }, "retry": false, "terminal": "queued" },
+  { "id": "unauthorized", "status": 401, "code": "R401-AUTH-001", "retry": false, "terminal": "failed" },
+  { "id": "forbidden", "status": 403, "code": "R403-AUTH-002", "retry": false, "terminal": "failed" },
+  { "id": "not-found", "status": 404, "retry": false, "terminal": "failed" },
+  { "id": "too-large", "status": 413, "retry": false, "terminal": "failed" },
+  { "id": "invalid", "status": 422, "retry": false, "terminal": "failed" },
+  { "id": "request-timeout", "status": 408, "retry": true, "terminal": "transient" },
+  { "id": "too-early", "status": 425, "retry": true, "terminal": "transient" },
+  { "id": "rate-limited", "status": 429, "headers": { "Retry-After": "2" }, "retry": true, "terminal": "transient" },
+  { "id": "server-error", "status": 503, "retry": true, "terminal": "transient" },
+  { "id": "network-error", "status": null, "error": "network", "retry": true, "terminal": "transient" }
+]

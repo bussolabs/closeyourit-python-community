@@ -1,0 +1,265 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://closeyour.it/contracts/ingest/v1/schema.json",
+  "title": "CloseYourIt ingest contract v1",
+  "oneOf": [
+    { "$ref": "#/$defs/event" },
+    { "$ref": "#/$defs/log" },
+    { "$ref": "#/$defs/metric" },
+    { "$ref": "#/$defs/pageview" },
+    { "$ref": "#/$defs/replay" }
+  ],
+  "$defs": {
+    "timestamp": {
+      "oneOf": [
+        { "type": "string", "format": "date-time" },
+        { "type": "number" }
+      ]
+    },
+    "sdk": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "stack_frame": {
+      "type": "object",
+      "required": ["filename", "function", "lineno"],
+      "properties": {
+        "filename": { "type": "string", "minLength": 1 },
+        "abs_path": { "type": "string" },
+        "function": { "type": "string", "minLength": 1 },
+        "lineno": { "type": "integer", "minimum": 1 },
+        "colno": { "type": "integer", "minimum": 0 },
+        "module": { "type": ["string", "null"] },
+        "in_app": { "type": "boolean" }
+      },
+      "additionalProperties": true
+    },
+    "exception_value": {
+      "type": "object",
+      "required": ["type", "value", "mechanism", "stacktrace"],
+      "properties": {
+        "type": { "type": "string", "minLength": 1 },
+        "value": { "type": "string" },
+        "mechanism": {
+          "type": "object",
+          "required": ["type", "handled"],
+          "properties": {
+            "type": { "type": "string", "minLength": 1 },
+            "handled": { "type": "boolean" }
+          },
+          "additionalProperties": true
+        },
+        "stacktrace": {
+          "type": "object",
+          "required": ["frames"],
+          "properties": {
+            "frames": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/stack_frame" }
+            }
+          },
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": true
+    },
+    "event": {
+      "type": "object",
+      "required": ["event_id", "timestamp", "platform", "level", "environment", "sdk"],
+      "anyOf": [
+        { "required": ["exception"] },
+        { "required": ["message"] }
+      ],
+      "properties": {
+        "event_id": { "type": "string", "minLength": 1 },
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "platform": { "type": "string", "minLength": 1 },
+        "level": { "enum": ["debug", "info", "warning", "error", "fatal"] },
+        "environment": { "type": "string", "minLength": 1 },
+        "release": { "type": "string" },
+        "sdk": { "$ref": "#/$defs/sdk" },
+        "exception": {
+          "type": "object",
+          "required": ["values"],
+          "properties": {
+            "values": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "$ref": "#/$defs/exception_value" }
+            }
+          },
+          "additionalProperties": true
+        },
+        "message": {
+          "oneOf": [
+            { "type": "string", "minLength": 1 },
+            {
+              "type": "object",
+              "required": ["formatted"],
+              "properties": { "formatted": { "type": "string", "minLength": 1 } },
+              "additionalProperties": true
+            }
+          ]
+        }
+      },
+      "additionalProperties": true
+    },
+    "log": {
+      "type": "object",
+      "required": ["event_id", "timestamp", "level", "message", "environment", "sdk"],
+      "properties": {
+        "event_id": { "type": "string", "minLength": 1 },
+        "timestamp": { "$ref": "#/$defs/timestamp" },
+        "level": { "enum": ["debug", "info", "warning", "error", "fatal"] },
+        "message": { "type": "string", "pattern": "\\S" },
+        "environment": { "type": "string", "minLength": 1 },
+        "sdk": { "$ref": "#/$defs/sdk" },
+        "attributes": { "type": "object" }
+      },
+      "additionalProperties": true
+    },
+    "metric_base": {
+      "type": "object",
+      "required": ["kind", "sample_id", "duration_ms", "occurred_at", "environment", "sdk"],
+      "properties": {
+        "sample_id": { "type": "string", "format": "uuid" },
+        "duration_ms": { "type": "number", "minimum": 0 },
+        "occurred_at": { "$ref": "#/$defs/timestamp" },
+        "environment": { "type": "string", "minLength": 1 },
+        "sdk": { "$ref": "#/$defs/sdk" }
+      }
+    },
+    "slow_method": {
+      "allOf": [
+        { "$ref": "#/$defs/metric_base" },
+        {
+          "type": "object",
+          "required": ["label"],
+          "properties": {
+            "kind": { "const": "slow_method" },
+            "label": { "type": "string", "pattern": "\\S" }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "slow_query": {
+      "allOf": [
+        { "$ref": "#/$defs/metric_base" },
+        {
+          "type": "object",
+          "required": ["sql"],
+          "properties": {
+            "kind": { "const": "slow_query" },
+            "sql": { "type": "string", "pattern": "\\S" }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "performance_issue": {
+      "allOf": [
+        { "$ref": "#/$defs/metric_base" },
+        {
+          "type": "object",
+          "required": ["subtype"],
+          "properties": {
+            "kind": { "const": "performance_issue" },
+            "subtype": { "type": "string", "pattern": "\\S" }
+          },
+          "additionalProperties": true
+        }
+      ]
+    },
+    "metric": {
+      "oneOf": [
+        { "$ref": "#/$defs/slow_method" },
+        { "$ref": "#/$defs/slow_query" },
+        { "$ref": "#/$defs/performance_issue" }
+      ]
+    },
+    "log_request": {
+      "oneOf": [
+        { "$ref": "#/$defs/log" },
+        {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": { "$ref": "#/$defs/log" }
+        }
+      ]
+    },
+    "metric_request": {
+      "oneOf": [
+        { "$ref": "#/$defs/metric" },
+        {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1000,
+          "items": { "$ref": "#/$defs/metric" }
+        }
+      ]
+    },
+    "pageview": {
+      "type": "object",
+      "required": ["event_id", "hostname", "path", "occurred_at", "environment"],
+      "properties": {
+        "event_id": { "type": "string", "format": "uuid" },
+        "name": { "type": "string", "pattern": "\\S" },
+        "hostname": { "type": "string", "pattern": "\\S" },
+        "path": { "type": "string", "pattern": "^[^?]+$" },
+        "referrer": { "type": "string" },
+        "utm_source": { "type": "string" },
+        "utm_medium": { "type": "string" },
+        "utm_campaign": { "type": "string" },
+        "utm_term": { "type": "string" },
+        "utm_content": { "type": "string" },
+        "screen_width": { "type": "integer", "minimum": 1 },
+        "occurred_at": { "$ref": "#/$defs/timestamp" },
+        "environment": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": true
+    },
+    "pageview_request": {
+      "oneOf": [
+        { "$ref": "#/$defs/pageview" },
+        {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 100,
+          "items": { "$ref": "#/$defs/pageview" }
+        }
+      ]
+    },
+    "replay": {
+      "type": "object",
+      "required": ["replay_session_id", "seq", "started_at", "events", "environment"],
+      "properties": {
+        "replay_session_id": { "type": "string", "pattern": "\\S" },
+        "seq": { "type": "integer", "minimum": 0 },
+        "started_at": { "$ref": "#/$defs/timestamp" },
+        "events": { "type": "array", "minItems": 1 },
+        "environment": { "type": "string", "minLength": 1 },
+        "path": { "type": "string", "pattern": "^[^?]+$" },
+        "user": { "type": "string", "pattern": "\\S" }
+      },
+      "additionalProperties": true
+    },
+    "replay_request": {
+      "oneOf": [
+        { "$ref": "#/$defs/replay" },
+        {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 50,
+          "items": { "$ref": "#/$defs/replay" }
+        }
+      ]
+    }
+  }
+}

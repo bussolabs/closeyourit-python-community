@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+.Python
+
+# Virtual environments
+.venv/
+.smoke-venv/
+.smoke-*-venv/
+venv/
+
+# Packaging
+build/
+dist/
+*.egg-info/
+
+# Test and analysis caches
+.coverage
+coverage.xml
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local tooling
+.firecrawl/
+.mise.local.toml
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+*.key
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
