@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable, Mapping
 from typing import Literal, Protocol, TypeVar, runtime_checkable
 
-from closeyourit._diagnostics import logger
+from closeyourit._diagnostics import logger, warn_dropped
 from closeyourit.configuration import Configuration
 from closeyourit.events import EventBuilder
 from closeyourit.models import EventPayload
@@ -74,17 +74,27 @@ class Client:
         level: str = "error",
         contexts: Mapping[str, object] | None = None,
     ) -> str | None:
-        if not self._sampled(self.configuration.sample_rate):
+        try:
+            if not self._sampled(self.configuration.sample_rate):
+                return None
+            if not isinstance(error, BaseException):
+                raise TypeError("error must be an exception instance")
+            return self._submit(
+                "events",
+                self.builder.exception(error, handled=handled, level=level, contexts=contexts),
+            )
+        except Exception as failure:
+            warn_dropped("capture_exception", failure)
             return None
-        return self._submit(
-            "events",
-            self.builder.exception(error, handled=handled, level=level, contexts=contexts),
-        )
 
     def capture_message(self, message: object, *, level: str = "info") -> str | None:
-        if not self._sampled(self.configuration.sample_rate):
+        try:
+            if not self._sampled(self.configuration.sample_rate):
+                return None
+            return self._submit("events", self.builder.message(message, level=level))
+        except Exception as failure:
+            warn_dropped("capture_message", failure)
             return None
-        return self._submit("events", self.builder.message(message, level=level))
 
     def log(
         self,
@@ -94,12 +104,16 @@ class Client:
         logger: str | None = None,
         **attributes: object,
     ) -> str | None:
-        if not self._sampled(self.configuration.logs_sample_rate):
+        try:
+            if not self._sampled(self.configuration.logs_sample_rate):
+                return None
+            return self._submit(
+                "logs",
+                self.builder.log(message, level=level, logger=logger, attributes=attributes),
+            )
+        except Exception as failure:
+            warn_dropped("log", failure)
             return None
-        return self._submit(
-            "logs",
-            self.builder.log(message, level=level, logger=logger, attributes=attributes),
-        )
 
     def add_breadcrumb(
         self,
@@ -110,34 +124,51 @@ class Client:
         level: str = "info",
         data: Mapping[str, object] | None = None,
     ) -> None:
-        if not self.configuration.breadcrumbs_enabled:
-            return
-        breadcrumb: EventPayload = {
-            "timestamp": self.builder.timestamp(),
-            "type": type,
-            "level": level,
-        }
-        if message is not None:
-            breadcrumb["message"] = message
-        if category is not None:
-            breadcrumb["category"] = category
-        if data:
-            breadcrumb["data"] = dict(data)
-        current_scope().add_breadcrumb(
-            breadcrumb, max_breadcrumbs=self.configuration.max_breadcrumbs
-        )
+        try:
+            if not self.configuration.breadcrumbs_enabled:
+                return
+            breadcrumb: EventPayload = {
+                "timestamp": self.builder.timestamp(),
+                "type": type,
+                "level": level,
+            }
+            if message is not None:
+                breadcrumb["message"] = message
+            if category is not None:
+                breadcrumb["category"] = category
+            if data:
+                breadcrumb["data"] = dict(data)
+            current_scope().add_breadcrumb(
+                breadcrumb, max_breadcrumbs=self.configuration.max_breadcrumbs
+            )
+        except Exception as failure:
+            warn_dropped("add_breadcrumb", failure)
 
     def measure(self, label: str, operation: Callable[[], T]) -> T:
-        label = label.strip()
-        if not label:
-            raise ValueError("measurement label must not be blank")
-        started_at = self.monotonic()
+        """Run the operation and time it; only the operation's own errors reach the caller."""
+        measurable = False
+        try:
+            normalized_label = label.strip()
+            if not normalized_label:
+                raise ValueError("measurement label must not be blank")
+            started_at = self.monotonic()
+            measurable = True
+        except Exception as failure:
+            warn_dropped("measure", failure)
+        if not measurable:
+            # Outside the handler, so an operation error is not chained to the dropped measurement.
+            return operation()
         try:
             return operation()
         finally:
-            duration_ms = (self.monotonic() - started_at) * 1000.0
-            if duration_ms >= self.configuration.slow_method_threshold_ms:
-                self.capture_duration(label, duration_ms)
+            # Runs while an application error may be propagating: a timing failure is only logged,
+            # so it can neither replace that error nor add one of its own.
+            try:
+                duration_ms = (self.monotonic() - started_at) * 1000.0
+                if duration_ms >= self.configuration.slow_method_threshold_ms:
+                    self.capture_duration(normalized_label, duration_ms)
+            except Exception as failure:
+                warn_dropped("measure", failure)
 
     def capture_duration(
         self,
@@ -149,16 +180,17 @@ class Client:
         """Capture a finite duration enriched with release and scrubbed integration context."""
         try:
             normalized_duration = float(duration_ms)
-        except (TypeError, ValueError, OverflowError):
+            if not math.isfinite(normalized_duration):
+                raise ValueError("duration must be finite")
+            payload = self.builder.slow_method(label, max(0.0, normalized_duration))
+            if self.configuration.release is not None:
+                payload["release"] = self.configuration.release
+            if contexts:
+                payload["contexts"] = self.builder.scrubber.scrub(dict(contexts))
+            return self._submit("metrics", payload)
+        except Exception as failure:
+            warn_dropped("capture_duration", failure)
             return None
-        if not math.isfinite(normalized_duration):
-            return None
-        payload = self.builder.slow_method(label, max(0.0, normalized_duration))
-        if self.configuration.release is not None:
-            payload["release"] = self.configuration.release
-        if contexts:
-            payload["contexts"] = self.builder.scrubber.scrub(dict(contexts))
-        return self._submit("metrics", payload)
 
     def capture_slow_request(
         self,
@@ -168,15 +200,19 @@ class Client:
         url: str,
         duration_ms: float,
     ) -> str | None:
-        return self._submit(
-            "metrics",
-            self.builder.slow_request(
-                route=route,
-                path=path,
-                url=url,
-                duration_ms=duration_ms,
-            ),
-        )
+        try:
+            return self._submit(
+                "metrics",
+                self.builder.slow_request(
+                    route=route,
+                    path=path,
+                    url=url,
+                    duration_ms=duration_ms,
+                ),
+            )
+        except Exception as failure:
+            warn_dropped("capture_slow_request", failure)
+            return None
 
     def capture_slow_query(
         self,
@@ -186,10 +222,14 @@ class Client:
         db_system: str | None = None,
         source: str | None = None,
     ) -> str | None:
-        return self._submit(
-            "metrics",
-            self.builder.slow_query(sql, duration_ms, db_system=db_system, source=source),
-        )
+        try:
+            return self._submit(
+                "metrics",
+                self.builder.slow_query(sql, duration_ms, db_system=db_system, source=source),
+            )
+        except Exception as failure:
+            warn_dropped("capture_slow_query", failure)
+            return None
 
     def capture_performance_issue(
         self,
@@ -204,20 +244,24 @@ class Client:
         query_count: int | None = None,
         total_query_time_ms: float | None = None,
     ) -> str | None:
-        return self._submit(
-            "metrics",
-            self.builder.performance_issue(
-                subtype,
-                duration_ms=duration_ms,
-                sql=sql,
-                source=source,
-                route=route,
-                http_host=http_host,
-                http_url=http_url,
-                query_count=query_count,
-                total_query_time_ms=total_query_time_ms,
-            ),
-        )
+        try:
+            return self._submit(
+                "metrics",
+                self.builder.performance_issue(
+                    subtype,
+                    duration_ms=duration_ms,
+                    sql=sql,
+                    source=source,
+                    route=route,
+                    http_host=http_host,
+                    http_url=http_url,
+                    query_count=query_count,
+                    total_query_time_ms=total_query_time_ms,
+                ),
+            )
+        except Exception as failure:
+            warn_dropped("capture_performance_issue", failure)
+            return None
 
     @property
     def usage(self) -> UsageRegistry:
@@ -229,9 +273,13 @@ class Client:
 
     def record_usage(self, kind: str, symbol: str) -> bool:
         """Count one sighting of a `route`, `job` or `custom` symbol in the current window."""
-        if not (self.configuration.usage_enabled and self.configuration.enabled):
+        try:
+            if not (self.configuration.usage_enabled and self.configuration.enabled):
+                return False
+            return self.usage.record(kind, symbol)
+        except Exception as failure:
+            warn_dropped("record_usage", failure)
             return False
-        return self.usage.record(kind, symbol)
 
     def used(self, key: str) -> bool:
         """Mark a literal feature key as used: "this part of the product actually runs"."""

@@ -4,6 +4,12 @@ Tutte le modifiche rilevanti dello SDK saranno documentate in questo file.
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-20
+
+### Fixed
+
+- **Le chiamate di segnalazione non sollevano più eccezioni.** `capture_exception`, `capture_message`, `log`, `add_breadcrumb`, `measure`, le metriche e `record_usage`/`used` scartano un dato inutilizzabile (messaggio vuoto, etichetta vuota, durata non valida, guasto interno) con un avviso sul logger `closeyourit` e restituiscono lo stesso risultato vuoto della libreria spenta. `measure` con etichetta vuota esegue l'operazione senza misurarla; gli errori dell'operazione misurata arrivano intatti all'applicazione. Un errore il cui testo non si legge viene inviato con un testo di ripiego che ne riporta il tipo. Nemmeno un filtro o un handler dell'applicazione che fallisce sul logger `closeyourit` può far uscire un errore da queste chiamate. (CYPY-23)
+
 ## [0.4.4] - 2026-11-20
 
 ### Fixed

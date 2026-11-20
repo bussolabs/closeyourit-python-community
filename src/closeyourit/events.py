@@ -45,6 +45,14 @@ def _level(value: object, *, fallback: str) -> str:
     return normalized if normalized in _LEVELS else fallback
 
 
+def _readable_text(value: object) -> str:
+    """Read an object's text; a failing ``__str__`` must not hide the original error."""
+    try:
+        return str(value)
+    except Exception:
+        return f"<unprintable {type(value).__name__} object>"
+
+
 def _compact(payload: EventPayload) -> EventPayload:
     return {key: value for key, value in payload.items() if value is not None}
 
@@ -330,7 +338,7 @@ class EventBuilder:
     def _exception_value(self, error: BaseException, *, handled: bool) -> EventPayload:
         return {
             "type": type(error).__name__,
-            "value": self.scrubber.scrub_message(str(error)),
+            "value": self.scrubber.scrub_message(_readable_text(error)),
             "stacktrace": {"frames": self._frames(error.__traceback__)},
             "mechanism": {"type": "python", "handled": handled},
         }
@@ -378,7 +386,7 @@ class EventBuilder:
         return {"name": "closeyourit-python", "version": __version__}
 
     def _message(self, value: object) -> str:
-        formatted = self.scrubber.scrub_message(str(value))
+        formatted = self.scrubber.scrub_message(_readable_text(value))
         if not formatted.strip():
             raise ValueError("message must not be blank")
         return formatted
