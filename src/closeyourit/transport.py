@@ -7,13 +7,14 @@ import json
 import os
 import queue
 import random
+import sys
 import threading
 import time
 import weakref
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
-from typing import Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 from urllib.error import HTTPError
 from urllib.parse import quote, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, OpenerDirector, Request, build_opener
@@ -22,6 +23,9 @@ from closeyourit._diagnostics import logger
 from closeyourit._version import __version__
 from closeyourit.configuration import Configuration
 from closeyourit.models import EventPayload
+
+if TYPE_CHECKING:
+    from multiprocessing.util import Finalize
 
 Channel = Literal["events", "logs", "metrics", "usages"]
 _CHANNELS = frozenset({"events", "logs", "metrics", "usages"})
@@ -132,6 +136,25 @@ def _register_for_fork(transport: Transport) -> None:
             _FORK_CALLBACK_REGISTERED = True
 
 
+def _in_multiprocessing_child() -> bool:
+    # Without the module loaded this cannot be a multiprocessing child: nothing to import.
+    if "multiprocessing" not in sys.modules:
+        return False
+    import multiprocessing
+
+    return multiprocessing.parent_process() is not None
+
+
+def _register_process_finalizer(callback: Callable[[], None]) -> Finalize[None]:
+    # A fork or forkserver child leaves through os._exit: depending on the Python version it skips
+    # atexit entirely, or drops the handlers inherited from the parent. Either way it runs its own
+    # multiprocessing finalizers first. That registry is cleared when the child boots, so this must
+    # happen inside the child, after the boot: that is why it waits for the first worker.
+    from multiprocessing.util import Finalize
+
+    return Finalize(None, callback, exitpriority=0)
+
+
 class Transport:
     """Non-blocking sink with bounded memory, retry, flush and process isolation."""
 
@@ -177,6 +200,8 @@ class Transport:
         self._worker: threading.Thread | None = None
         self._closed = False
         self._atexit_registered = False
+        self._process_finalizer: Finalize[None] | None = None
+        self._exit_deadline: float | None = None
         self._enqueued = 0
         self._dropped = 0
         self._sent = 0
@@ -274,8 +299,12 @@ class Transport:
             worker.join(max(0.0, deadline - self._monotonic()))
         stopped = worker is None or not worker.is_alive()
         if self._atexit_registered:
-            atexit.unregister(self._atexit_close)
+            atexit.unregister(self._exit_close)
             self._atexit_registered = False
+        finalizer = self._process_finalizer
+        if finalizer is not None:
+            finalizer.cancel()
+            self._process_finalizer = None
         return drained and stopped
 
     def _record_drop(self, reason: str) -> None:
@@ -305,8 +334,10 @@ class Transport:
             )
             self._worker = worker
             if not self._atexit_registered:
-                atexit.register(self._atexit_close)
+                atexit.register(self._exit_close)
                 self._atexit_registered = True
+            if self._process_finalizer is None and _in_multiprocessing_child():
+                self._process_finalizer = _register_process_finalizer(self._exit_close)
             worker.start()
 
     def _run(self) -> None:
@@ -447,11 +478,20 @@ class Transport:
 
     def _after_fork_child(self) -> None:
         inherited_atexit_registration = self._atexit_registered
+        inherited_finalizer = self._process_finalizer
         self._pid = os.getpid()
         self._initialize_process_state()
         self._atexit_registered = inherited_atexit_registration
+        # The parent's finalizer belongs to the parent's pid and would be ignored here; the child
+        # registers its own when its worker starts.
+        if inherited_finalizer is not None:
+            inherited_finalizer.cancel()
 
-    def _atexit_close(self) -> None:
+    def _exit_close(self) -> None:
         # Python 3.12+ rejects starting threads during interpreter shutdown. Every accepted
-        # envelope already has a worker, so the exit hook only drains an existing one.
-        self._close(self._shutdown_timeout, allow_start=False)
+        # envelope already has a worker, so the exit hook only drains an existing one. The atexit
+        # hook and the multiprocessing finalizer share one deadline: a process never waits more
+        # than shutdown_timeout in total, even if both run.
+        if self._exit_deadline is None:
+            self._exit_deadline = self._monotonic() + self._shutdown_timeout
+        self._close(max(0.0, self._exit_deadline - self._monotonic()), allow_start=False)

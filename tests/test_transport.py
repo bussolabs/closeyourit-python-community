@@ -1,19 +1,32 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import logging
+import multiprocessing
+import subprocess
+import sys
+import textwrap
 import threading
+import time
 from collections import deque
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from email.message import Message
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from io import BytesIO
-from typing import TypeAlias, cast
+from typing import TYPE_CHECKING, Literal, TypeAlias, cast
 from urllib.error import HTTPError
 from urllib.request import OpenerDirector, Request
 
 import pytest
 
-from closeyourit import Configuration, HttpResponse, Transport, UrllibHttpRequester
+from closeyourit import Client, Configuration, HttpResponse, Transport, UrllibHttpRequester
+from closeyourit.transport import _in_multiprocessing_child
+
+if TYPE_CHECKING:
+    from multiprocessing.context import ForkContext, ForkServerContext, SpawnContext
+    from multiprocessing.sharedctypes import Synchronized
+    from multiprocessing.synchronize import Event
 
 Outcome: TypeAlias = (
     HttpResponse | BaseException | Callable[[str, bytes, Mapping[str, str], float], HttpResponse]
@@ -62,6 +75,43 @@ class BlockingRequester:
         self.entered.set()
         assert self.release.wait(2)
         return HttpResponse(202)
+
+
+class SimulatedClock:
+    """Monotonic time that moves only when a simulated wait spends it."""
+
+    def __init__(self, spent: Synchronized[float] | None = None) -> None:
+        self.now = 0.0
+        self._spent = spent
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+        if self._spent is not None:
+            self._spent.value = self.now
+
+
+class SimulatedCondition(threading.Condition):
+    """A condition whose timed waits spend simulated time instead of real time."""
+
+    def __init__(self, clock: SimulatedClock) -> None:
+        super().__init__()
+        self.clock = clock
+
+    def wait(self, timeout: float | None = None) -> bool:
+        if timeout is None:
+            return super().wait()
+        # Nothing notifies a stalled delivery: the whole timeout passes, without waiting for it.
+        self.clock.advance(timeout)
+        return False
+
+
+def simulate_time(transport: Transport, clock: SimulatedClock) -> None:
+    # Before the first enqueue: the worker shares the condition from then on.
+    transport._monotonic = clock
+    transport._condition = SimulatedCondition(clock)
 
 
 class FakeUrlResponse:
@@ -438,3 +488,391 @@ def test_terminal_delivery_failure_logs_a_warning_with_the_last_failure(
 
     assert transport.stats.failed == 1
     transport.close()
+
+
+def test_main_process_registers_no_child_finalizer() -> None:
+    transport = Transport(valid_configuration(), requester=ScriptedRequester(HttpResponse(202)))
+
+    assert transport.enqueue("events", {"n": 1})
+    assert transport.flush(1)
+
+    assert _in_multiprocessing_child() is False
+    assert transport._process_finalizer is None
+    assert transport.close(1) is True
+
+
+def test_child_detection_does_not_import_multiprocessing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delitem(sys.modules, "multiprocessing")
+
+    assert _in_multiprocessing_child() is False
+    assert "multiprocessing" not in sys.modules
+
+
+def test_close_cancels_the_child_finalizer(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("closeyourit.transport._in_multiprocessing_child", lambda: True)
+    transport = Transport(valid_configuration(), requester=ScriptedRequester(HttpResponse(202)))
+
+    assert transport.enqueue("events", {"n": 1})
+    finalizer = transport._process_finalizer
+    assert finalizer is not None
+    assert finalizer.still_active() is True
+
+    assert transport.close(1) is True
+    assert finalizer.still_active() is False
+    assert transport._process_finalizer is None
+    assert transport.close(1) is True
+
+
+def test_child_finalizer_and_atexit_share_one_deadline_and_send_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("closeyourit.transport._in_multiprocessing_child", lambda: True)
+    requester = BlockingRequester()
+    clock = SimulatedClock()
+    transport = Transport(valid_configuration(), requester=requester, shutdown_timeout=2.0)
+    simulate_time(transport, clock)
+
+    assert transport.enqueue("events", {"n": 1})
+    assert requester.entered.wait(1)
+    finalizer = transport._process_finalizer
+    assert finalizer is not None
+
+    finalizer()
+    # The stalled delivery spent the whole budget.
+    assert clock.now == 2.0
+    transport._exit_close()
+    # The second hook got no fresh budget: it did not wait at all.
+    assert clock.now == 2.0
+
+    assert transport._process_finalizer is None
+    assert transport._atexit_registered is False
+    requester.release.set()
+    worker = transport._worker
+    assert worker is not None
+    worker.join(1)
+    assert not worker.is_alive()
+    assert transport.close(1) is True
+    assert requester.bodies == [b'{"n":1}']
+    assert transport.stats.sent == 1
+
+
+def test_exit_hooks_split_one_budget_when_the_first_ends_early(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clock = SimulatedClock()
+    transport = Transport(
+        valid_configuration(), requester=ScriptedRequester(), shutdown_timeout=2.0, monotonic=clock
+    )
+    budgets: list[float | None] = []
+
+    def close_spending_half_a_second(timeout: float | None, *, allow_start: bool) -> bool:
+        assert allow_start is False
+        budgets.append(timeout)
+        clock.advance(0.5)
+        return True
+
+    monkeypatch.setattr(transport, "_close", close_spending_half_a_second)
+
+    transport._exit_close()
+    transport._exit_close()
+    transport._exit_close()
+
+    assert budgets == [2.0, 1.5, 1.0]
+
+
+def test_pid_change_cancels_the_inherited_child_finalizer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("closeyourit.transport._in_multiprocessing_child", lambda: True)
+    transport = Transport(valid_configuration(), requester=ScriptedRequester(HttpResponse(202)))
+    assert transport.enqueue("events", {"parent": True})
+    assert transport.flush(1)
+    inherited = transport._process_finalizer
+    assert inherited is not None
+    parent_pid = transport.stats.pid
+
+    monkeypatch.setattr("closeyourit.transport.os.getpid", lambda: parent_pid + 1)
+
+    assert transport.stats.pid == parent_pid + 1
+    assert inherited.still_active() is False
+    assert transport._process_finalizer is None
+    assert transport.close(1) is True
+
+
+# Real child processes. The fake ingest server lives in the test process; each child builds or
+# inherits a client, reports one error and returns without flushing, as an application would.
+
+StartMethod: TypeAlias = Literal["fork", "spawn", "forkserver"]
+START_METHODS = [
+    pytest.param(
+        method,
+        marks=pytest.mark.skipif(
+            method not in multiprocessing.get_all_start_methods(),
+            reason=f"the {method} start method is not available on this platform",
+        ),
+    )
+    for method in ("fork", "spawn", "forkserver")
+]
+SHUTDOWN_TIMEOUT = 2.0
+# Child teardown (interpreter shutdown, process reaping) on a busy CI runner, on top of the wait.
+EXIT_MARGIN = 1.0
+
+
+class IngestServer:
+    """Loopback ingest recording every POST; a stalled one never answers while the test runs."""
+
+    def __init__(self, *, stalled: bool) -> None:
+        self.bodies: list[bytes] = []
+        self.release = threading.Event()
+        if not stalled:
+            self.release.set()
+        self.on_post: Callable[[], object] | None = None
+        server = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                server.bodies.append(self.rfile.read(length))
+                if server.on_post is not None:
+                    server.on_post()
+                server.release.wait(30)
+                self.send_response(202)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, format: str, *args: object) -> None:
+                del format, args
+
+        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        self._server.daemon_threads = True
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self._server.server_port}"
+
+    def close(self) -> None:
+        self.release.set()
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(5)
+
+
+@pytest.fixture
+def ingest() -> Iterator[IngestServer]:
+    server = IngestServer(stalled=False)
+    yield server
+    server.close()
+
+
+@pytest.fixture
+def stalled_ingest() -> Iterator[IngestServer]:
+    server = IngestServer(stalled=True)
+    yield server
+    server.close()
+
+
+def ingest_client(url: str) -> Client:
+    return Client(valid_configuration(endpoint_url=url, environment="test"))
+
+
+def report(client: Client, message: str) -> None:
+    try:
+        raise RuntimeError(message)
+    except RuntimeError as error:
+        assert client.capture_exception(error, handled=True) is not None
+
+
+def child_reports_and_returns(
+    url: str, flush_by_hand: bool, finished_at: Synchronized[float]
+) -> None:
+    client = ingest_client(url)
+    report(client, "child failed")
+    if flush_by_hand:
+        assert client.flush(SHUTDOWN_TIMEOUT)
+    finished_at.value = time.monotonic()
+
+
+def child_reports_to_a_stalled_server(
+    url: str, posted: Event, waited: Synchronized[float], finished_at: Synchronized[float]
+) -> None:
+    client = ingest_client(url)
+    transport = client.sink
+    assert isinstance(transport, Transport)
+    # The exit hooks wait on simulated time: the budget they spend lands in waited.
+    simulate_time(transport, SimulatedClock(waited))
+    report(client, "child failed")
+    # The delivery is in flight and the server will not answer it.
+    assert posted.wait(SHUTDOWN_TIMEOUT * 5)
+    finished_at.value = time.monotonic()
+
+
+def child_reports_with_inherited_client(client: Client, finished_at: Synchronized[float]) -> None:
+    report(client, "forked child failed")
+    finished_at.value = time.monotonic()
+
+
+def child_checks_its_exit_finalizer(url: str, finished_at: Synchronized[float]) -> None:
+    client = ingest_client(url)
+    report(client, "child failed")
+    transport = client.sink
+    assert isinstance(transport, Transport)
+    finalizer = transport._process_finalizer
+    # Registered after the child booted: still in the registry multiprocessing runs at exit.
+    assert finalizer is not None
+    assert finalizer.still_active()
+    finished_at.value = time.monotonic()
+
+
+def child_reports_nothing(url: str, finished_at: Synchronized[float]) -> None:
+    ingest_client(url)
+    finished_at.value = time.monotonic()
+
+
+def run_child(
+    method: StartMethod, target: Callable[..., None], *args: object
+) -> tuple[int | None, float]:
+    """Run a child to completion; return its exit code and the seconds it took to exit."""
+    # A union of start methods falls through to the str overload, typed as a bare BaseContext.
+    context = cast(
+        "ForkContext | ForkServerContext | SpawnContext", multiprocessing.get_context(method)
+    )
+    finished_at = context.Value(ctypes.c_double, 0.0)
+    process = context.Process(target=target, args=(*args, finished_at))
+    process.start()
+    process.join(SHUTDOWN_TIMEOUT * 5)
+    exited_at = time.monotonic()
+    if process.is_alive():
+        process.kill()
+        process.join()
+        pytest.fail("the child process did not exit")
+    assert finished_at.value > 0, "the child failed before reporting"
+    return process.exitcode, exited_at - finished_at.value
+
+
+def received_messages(server: IngestServer) -> list[str]:
+    messages: list[str] = []
+    for body in server.bodies:
+        payload = json.loads(body)
+        messages.extend(exception["value"] for exception in payload["exception"]["values"])
+    return messages
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize("method", START_METHODS)
+def test_child_delivers_its_report_once_before_exiting(
+    method: StartMethod, ingest: IngestServer
+) -> None:
+    exitcode, _ = run_child(method, child_reports_and_returns, ingest.url, False)
+
+    assert exitcode == 0
+    assert received_messages(ingest) == ["child failed"]
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize("method", START_METHODS)
+def test_child_keeps_its_exit_finalizer_on_every_python_version(
+    method: StartMethod, ingest: IngestServer
+) -> None:
+    # From Python 3.13 a child also runs its own atexit hooks, so delivery alone would not notice
+    # a finalizer lost to the boot-time reset: check the registration itself.
+    exitcode, _ = run_child(method, child_checks_its_exit_finalizer, ingest.url)
+
+    assert exitcode == 0
+    assert received_messages(ingest) == ["child failed"]
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.skipif(
+    "fork" not in multiprocessing.get_all_start_methods(),
+    reason="the fork start method is not available on this platform",
+)
+def test_forked_child_delivers_with_the_client_inherited_from_its_parent(
+    ingest: IngestServer,
+) -> None:
+    client = ingest_client(ingest.url)
+    report(client, "parent failed")
+    assert client.flush(SHUTDOWN_TIMEOUT)
+
+    exitcode, _ = run_child("fork", child_reports_with_inherited_client, client)
+
+    assert exitcode == 0
+    assert received_messages(ingest) == ["parent failed", "forked child failed"]
+    assert client.close(SHUTDOWN_TIMEOUT) is True
+    assert received_messages(ingest) == ["parent failed", "forked child failed"]
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize("method", START_METHODS)
+def test_child_exit_waits_at_most_the_shutdown_timeout_on_a_stalled_server(
+    method: StartMethod, stalled_ingest: IngestServer
+) -> None:
+    context = multiprocessing.get_context(method)
+    posted = context.Event()
+    waited = context.Value(ctypes.c_double, -1.0)
+    stalled_ingest.on_post = posted.set
+
+    exitcode, exit_duration = run_child(
+        method, child_reports_to_a_stalled_server, stalled_ingest.url, posted, waited
+    )
+
+    assert exitcode == 0
+    assert len(stalled_ingest.bodies) == 1
+    # It waited for the stalled delivery, and only once: two waits would spend twice the budget.
+    assert waited.value == SHUTDOWN_TIMEOUT
+    # The wait was simulated, so the child exits at once instead of hanging on the server.
+    assert exit_duration < EXIT_MARGIN
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize("method", START_METHODS)
+def test_child_that_reports_nothing_sends_nothing_and_exits_at_once(
+    method: StartMethod, ingest: IngestServer
+) -> None:
+    exitcode, exit_duration = run_child(method, child_reports_nothing, ingest.url)
+
+    assert exitcode == 0
+    assert ingest.bodies == []
+    assert exit_duration < EXIT_MARGIN
+
+
+@pytest.mark.filterwarnings("ignore::DeprecationWarning")
+@pytest.mark.parametrize("method", START_METHODS)
+def test_child_that_flushes_by_hand_sends_its_report_once(
+    method: StartMethod, ingest: IngestServer
+) -> None:
+    exitcode, _ = run_child(method, child_reports_and_returns, ingest.url, True)
+
+    assert exitcode == 0
+    assert received_messages(ingest) == ["child failed"]
+
+
+def test_main_process_delivers_its_report_once_at_exit(ingest: IngestServer) -> None:
+    script = textwrap.dedent(
+        f"""
+        import multiprocessing  # loaded, as in an application that also starts children
+
+        from closeyourit import Client, Configuration
+
+        client = Client(
+            Configuration(
+                endpoint_url={ingest.url!r},
+                token="cyi_test_token",
+                project_id="12345678-1234-1234-1234-123456789abc",
+                environment="test",
+            )
+        )
+        try:
+            raise RuntimeError("main failed")
+        except RuntimeError as error:
+            client.capture_exception(error, handled=True)
+        """
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, timeout=15
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert received_messages(ingest) == ["main failed"]

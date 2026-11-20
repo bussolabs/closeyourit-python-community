@@ -184,11 +184,14 @@ def _route(routes: Any, original: dict[str, object], dispatched: dict[str, objec
                 child = {**original, "root_path": root + path[: -len(remaining)]}
                 nested = _route(route.routes, child, dispatched)
                 return route.path_format.removesuffix("/{path}") + nested if nested else None
-        elif isinstance(route, Route) and type(route).matches is Route.matches:
-            if route.path_regex.match(path):
-                if not route.methods or original.get("method") in route.methods:
-                    return str(route.path_format)
-                partial = str(route.path_format)
+        elif (
+            isinstance(route, Route)
+            and type(route).matches is Route.matches
+            and route.path_regex.match(path)
+        ):
+            if not route.methods or original.get("method") in route.methods:
+                return str(route.path_format)
+            partial = str(route.path_format)
     return partial
 
 

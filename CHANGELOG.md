@@ -4,6 +4,12 @@ Tutte le modifiche rilevanti dello SDK saranno documentate in questo file.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-20
+
+### Fixed
+
+- **Errori dei processi figli non più persi.** Un processo figlio avviato con `multiprocessing` che segnala un errore e termina subito lo spedisce prima di chiudersi, attendendo al massimo 2 secondi. Per processi copiati a mano, Celery prefork e server come gunicorn o uWSGI la guida consiglia `client.flush()` a fine lavoro. (CYPY-21)
+
 ## [0.4.2] - 2026-10-25
 
 ### Changed
