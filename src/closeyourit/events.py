@@ -14,6 +14,7 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import UUID, uuid4
 
 from closeyourit._version import __version__
+from closeyourit.budget import cap_text
 from closeyourit.configuration import Configuration
 from closeyourit.models import EventPayload
 from closeyourit.scope import current_scope
@@ -338,7 +339,7 @@ class EventBuilder:
     def _exception_value(self, error: BaseException, *, handled: bool) -> EventPayload:
         return {
             "type": type(error).__name__,
-            "value": self.scrubber.scrub_message(_readable_text(error)),
+            "value": self.scrubber.scrub_message(cap_text(_readable_text(error))),
             "stacktrace": {"frames": self._frames(error.__traceback__)},
             "mechanism": {"type": "python", "handled": handled},
         }
@@ -386,7 +387,9 @@ class EventBuilder:
         return {"name": "closeyourit-python", "version": __version__}
 
     def _message(self, value: object) -> str:
-        formatted = self.scrubber.scrub_message(_readable_text(value))
+        # Cut before scrubbing: the scrubber never scans millions of characters that could not
+        # reach the wire anyway.
+        formatted = self.scrubber.scrub_message(cap_text(_readable_text(value)))
         if not formatted.strip():
             raise ValueError("message must not be blank")
         return formatted

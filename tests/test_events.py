@@ -8,6 +8,7 @@ import pytest
 
 from closeyourit import Configuration, current_scope
 from closeyourit._version import __version__
+from closeyourit.budget import ELLIPSIS, MAX_TEXT_CHARS
 from closeyourit.events import EventBuilder
 
 NOW = datetime(2026, 7, 13, 14, 0, tzinfo=UTC)
@@ -121,6 +122,46 @@ def test_message_log_and_metric_builders_use_canonical_wire_fields() -> None:
 
 def test_unknown_log_level_falls_back_to_info() -> None:
     assert builder().log("hello", level="custom")["level"] == "info"
+
+
+# Long texts below are made of short words: a single run of millions of word characters makes the
+# scrubber itself quadratic, a known limit tracked apart from the byte budget.
+PROSE = "lorem ipsum dolor "
+
+
+def test_huge_texts_are_capped_before_scrubbing_in_messages_logs_and_errors() -> None:
+    huge = "password=hunter2 " + PROSE * (6_000_000 // len(PROSE))
+    event_builder = builder()
+
+    message = event_builder.message(huge)["message"]["formatted"]  # type: ignore[index]
+    log = event_builder.log(huge)["message"]
+    error = event_builder.exception(RuntimeError(huge))["exception"]
+    value = error["values"][-1]["value"]  # type: ignore[index]
+
+    for text in (message, log, value):
+        assert isinstance(text, str)
+        # The cut happens first; the mask may then add a few characters of its own.
+        assert len(text) <= MAX_TEXT_CHARS + len("[FILTERED]")
+        assert text.startswith("password=[FILTERED] lorem ipsum")
+        assert text.endswith(ELLIPSIS)
+
+
+def test_a_long_text_that_fits_the_budget_is_kept_whole() -> None:
+    # Far beyond 8,000 characters and well under the byte budget, with two-byte characters.
+    long_text = "caffè è pronto " * 7_000
+    event_builder = builder()
+
+    assert event_builder.message(long_text)["message"] == {"formatted": long_text}
+    assert event_builder.log(long_text)["message"] == long_text
+    error = event_builder.exception(RuntimeError(long_text))
+    assert error["exception"]["values"][-1]["value"] == long_text  # type: ignore[index]
+
+
+def test_a_text_at_the_character_cap_is_not_cut() -> None:
+    text = (PROSE * (MAX_TEXT_CHARS // len(PROSE) + 1))[:MAX_TEXT_CHARS]
+
+    assert builder().log(text)["message"] == text
+    assert builder().log(text + "x")["message"] == text[:-1] + ELLIPSIS
 
 
 def test_sql_metric_builders_fingerprint_raw_sql_and_supply_canonical_durations() -> None:

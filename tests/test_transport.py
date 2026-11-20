@@ -20,7 +20,15 @@ from urllib.request import OpenerDirector, Request
 
 import pytest
 
-from closeyourit import Client, Configuration, HttpResponse, Transport, UrllibHttpRequester
+from closeyourit import (
+    Client,
+    Configuration,
+    EventBuilder,
+    HttpResponse,
+    Transport,
+    UrllibHttpRequester,
+    budget,
+)
 from closeyourit.transport import _in_multiprocessing_child
 
 if TYPE_CHECKING:
@@ -487,6 +495,141 @@ def test_terminal_delivery_failure_logs_a_warning_with_the_last_failure(
         assert "http_400:R400-X" in message
 
     assert transport.stats.failed == 1
+    transport.close()
+
+
+def sized_payload(size: int) -> dict[str, object]:
+    payload: dict[str, object] = {"event_id": "e1", "level": "info", "message": ""}
+    payload["message"] = "x" * (size - len(budget.encode(payload)))
+    assert len(budget.encode(payload)) == size
+    return payload
+
+
+@pytest.mark.parametrize("size", [budget.MAX_PAYLOAD_BYTES - 1, budget.MAX_PAYLOAD_BYTES])
+def test_a_payload_up_to_the_limit_is_sent_unchanged(size: int) -> None:
+    requester = ScriptedRequester(HttpResponse(202))
+    transport = Transport(valid_configuration(), requester=requester)
+    payload = sized_payload(size)
+
+    assert transport.enqueue("logs", payload) is True
+    assert transport.flush(1)
+
+    assert requester.calls[0][1] == budget.encode(payload)
+    assert "truncated" not in json.loads(requester.calls[0][1])
+    transport.close()
+
+
+def test_a_payload_one_byte_over_the_limit_is_shrunk_marked_and_sent() -> None:
+    requester = ScriptedRequester(HttpResponse(202))
+    transport = Transport(valid_configuration(), requester=requester)
+    payload = sized_payload(budget.MAX_PAYLOAD_BYTES + 1)
+    original = dict(payload)
+
+    assert transport.enqueue("logs", payload) is True
+    assert transport.flush(1)
+
+    body = requester.calls[0][1]
+    assert len(body) <= budget.MAX_PAYLOAD_BYTES
+    sent = json.loads(body)
+    assert sent["truncated"] is True
+    assert sent["event_id"] == "e1"
+    assert payload == original
+    assert transport.stats.sent == 1
+    transport.close()
+
+
+def test_a_payload_that_cannot_fit_is_dropped_with_an_explicit_reason(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    requester = ScriptedRequester()
+    transport = Transport(valid_configuration(), requester=requester)
+    payload: dict[str, object] = {
+        "event_id": "e" * budget.MAX_PAYLOAD_BYTES,
+        "level": "info",
+        "message": "m",
+    }
+
+    with caplog.at_level(logging.WARNING, logger="closeyourit"):
+        assert transport.enqueue("logs", payload) is False
+
+    messages = [record.getMessage() for record in caplog.records if record.name == "closeyourit"]
+    assert any("exceeds the 524288-byte limit" in message for message in messages)
+    assert any("payload_too_large" in message for message in messages)
+    assert transport.stats.dropped == 1
+    assert transport.stats.enqueued == 0
+    assert requester.calls == []
+    transport.close()
+
+
+def test_a_six_million_character_message_arrives_shortened_instead_of_lost() -> None:
+    requester = ScriptedRequester(HttpResponse(202))
+    configuration = valid_configuration()
+    client = Client(configuration, sink=Transport(configuration, requester=requester))
+
+    message = ("order failed " * 500_000)[:6_000_000]
+    assert client.capture_message(message) is not None
+    assert client.flush(2)
+
+    body = requester.calls[0][1]
+    assert len(body) <= budget.MAX_PAYLOAD_BYTES
+    sent = json.loads(body)
+    assert sent["truncated"] is True
+    assert sent["message"]["formatted"].startswith("order failed order failed")
+    assert sent["message"]["formatted"].endswith(budget.ELLIPSIS)
+    client.close()
+
+
+def test_a_log_with_megabytes_of_attributes_arrives_with_level_and_message() -> None:
+    requester = ScriptedRequester(HttpResponse(202))
+    configuration = valid_configuration()
+    client = Client(configuration, sink=Transport(configuration, requester=requester))
+
+    assert client.log("export done", level="warning", dump="d" * (3 * 1024 * 1024)) is not None
+    assert client.flush(2)
+
+    body = requester.calls[0][1]
+    assert len(body) <= budget.MAX_PAYLOAD_BYTES
+    sent = json.loads(body)
+    assert "attributes" not in sent
+    assert sent["level"] == "warning"
+    assert sent["message"] == "export done"
+    assert sent["truncated"] is True
+    client.close()
+
+
+def test_data_added_by_before_send_is_measured_too() -> None:
+    def inflate(payload: dict[str, object]) -> dict[str, object]:
+        payload["extra"] = {"dump": "x" * (2 * budget.MAX_PAYLOAD_BYTES)}
+        return payload
+
+    requester = ScriptedRequester(HttpResponse(202))
+    configuration = valid_configuration(before_send=inflate)
+    client = Client(configuration, sink=Transport(configuration, requester=requester))
+
+    assert client.capture_message("checkout failed") is not None
+    assert client.flush(2)
+
+    sent = json.loads(requester.calls[0][1])
+    assert "extra" not in sent
+    assert sent["message"] == {"formatted": "checkout failed"}
+    assert sent["truncated"] is True
+    client.close()
+
+
+def test_a_usual_error_is_sent_exactly_as_built() -> None:
+    requester = ScriptedRequester(HttpResponse(202))
+    configuration = valid_configuration()
+    transport = Transport(configuration, requester=requester)
+    try:
+        raise RuntimeError("checkout failed " * 1_000)
+    except RuntimeError as error:
+        payload = EventBuilder(configuration).exception(error)
+
+    assert transport.enqueue("events", payload) is True
+    assert transport.flush(1)
+
+    assert requester.calls[0][1] == budget.encode(payload)
+    assert "truncated" not in json.loads(requester.calls[0][1])
     transport.close()
 
 

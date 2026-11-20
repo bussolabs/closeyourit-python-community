@@ -4,6 +4,13 @@ Tutte le modifiche rilevanti dello SDK saranno documentate in questo file.
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-11-20
+
+### Fixed
+
+- **Invii troppo grandi non più persi.** Il transport misura ogni invio in byte dopo `before_send`. Oltre 512 KiB toglie prima le parti meno utili e aggiunge `"truncated": true`; un invio entro il tetto parte identico a prima. Gli errori perdono, nell'ordine, cronologia più vecchia, richiesta, utente e contesti dell'applicazione, extra, tag, frame più esterni e infine testo. I log perdono gli attributi e poi accorciano il messaggio. Le metriche perdono i campi personalizzati e poi accorciano i testi liberi. Il taglio avviene sempre tra caratteri interi. Se nemmeno i campi obbligatori stanno sotto il tetto, l'invio viene scartato con il motivo `payload_too_large` sul logger `closeyourit`. (CYPY-25)
+- **Testi enormi accorciati prima del filtro dati sensibili.** Messaggi, log e testo degli errori oltre 524.288 caratteri vengono tagliati prima del filtro. Un testo così lungo non potrebbe comunque stare nel tetto, quindi chi resta sotto il tetto non vede differenze. (CYPY-25)
+
 ## [0.4.5] - 2026-11-20
 
 ### Fixed

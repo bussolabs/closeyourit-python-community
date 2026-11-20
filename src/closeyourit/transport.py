@@ -19,6 +19,7 @@ from urllib.error import HTTPError
 from urllib.parse import quote, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, OpenerDirector, Request, build_opener
 
+from closeyourit import budget
 from closeyourit._diagnostics import logger
 from closeyourit._version import __version__
 from closeyourit.configuration import Configuration
@@ -220,14 +221,22 @@ class Transport:
             self._record_drop("unknown_channel")
             return False
         try:
-            body = json.dumps(
-                payload,
-                ensure_ascii=False,
-                allow_nan=False,
-                separators=(",", ":"),
-            ).encode("utf-8")
+            encoded = budget.encode(payload)
         except (TypeError, ValueError, OverflowError):
             self._record_drop("unserializable_payload")
+            return False
+        # Measured after `before_send`, so whatever the application added counts too. A 413 is
+        # never retried: an oversized body sent as is would be lost on the server side anyway.
+        body = budget.fit(channel, encoded)
+        if body is None:
+            logger.warning(
+                "closeyourit dropped a %d-byte %s payload: without its optional parts it still "
+                "exceeds the %d-byte limit",
+                len(encoded),
+                channel,
+                budget.MAX_PAYLOAD_BYTES,
+            )
+            self._record_drop("payload_too_large")
             return False
 
         with self._condition:
