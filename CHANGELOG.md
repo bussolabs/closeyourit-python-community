@@ -4,6 +4,12 @@ Tutte le modifiche rilevanti dello SDK saranno documentate in questo file.
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-11-20
+
+### Fixed
+
+- **Memoria limitata per le chiamate HTTP ripetute.** Gli indirizzi senza chiamate recenti escono dall'elenco usato per riconoscere le chiamate ripetute, che tiene al massimo 1000 indirizzi scartando quelli usati meno di recente e, per ogni indirizzo, solo le chiamate che servono a riconoscere la soglia. Ogni processo duplicato all'avvio riparte da un elenco vuoto e da un blocco nuovo. Soglia, finestra e contenuto dell'avviso restano invariati. (CYPY-20)
+
 ## [0.4.6] - 2026-11-20
 
 ### Fixed

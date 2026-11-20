@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 import re
 import secrets
 import time
-from collections import deque
+from bisect import insort
+from collections import OrderedDict, deque
 from collections.abc import Callable
 from dataclasses import dataclass
 from threading import Lock
@@ -21,6 +23,8 @@ _UUID = re.compile(
 )
 _LONG_HEX = re.compile(r"(?<![0-9a-f])[0-9a-f]{16,}(?![0-9a-f])", re.IGNORECASE)
 _LONG_NUMBER = re.compile(r"(?<!\d)\d{3,}(?!\d)")
+# Bounds the repeated-call tracker even when thousands of distinct URLs are hit within one window.
+_REPEATED_HTTP_MAX_KEYS = 1_000
 
 
 class AnyHeaders(Protocol):
@@ -81,19 +85,61 @@ def normalize_http_target(raw_url: str) -> HttpTarget | None:
 
 
 class RepeatedHttpTracker:
-    def __init__(self, *, threshold: int, window_ms: float) -> None:
+    def __init__(
+        self,
+        *,
+        threshold: int,
+        window_ms: float,
+        max_keys: int = _REPEATED_HTTP_MAX_KEYS,
+        pid: Callable[[], int] = os.getpid,
+    ) -> None:
         self.threshold = threshold
         self.window_ms = window_ms
-        self._hits: dict[str, deque[float]] = {}
+        self.max_keys = max(1, max_keys)
+        self._pid_source = pid
+        self._pid = pid()
+        self._initialize_process_state()
+
+    def _initialize_process_state(self) -> None:
+        # The lock is recreated with the hits: at fork time it could be held by a thread that does
+        # not exist in the child, and the child must not count the parent's calls.
         self._lock = Lock()
+        # Least recently used first, so expired and overflowing keys leave from the front.
+        self._hits: OrderedDict[str, deque[float]] = OrderedDict()
+
+    def _ensure_process(self) -> None:
+        current = self._pid_source()
+        if current != self._pid:
+            self._pid = current
+            self._initialize_process_state()
 
     def record(self, key: str, *, now_ms: float) -> int:
+        # Checked before taking the lock: an inherited lock may never be released in the child.
+        self._ensure_process()
         cutoff = now_ms - self.window_ms
         with self._lock:
-            hits = self._hits.setdefault(key, deque())
+            hits = self._hits.pop(key, None)
+            if hits is None:
+                hits = deque()
             while hits and hits[0] <= cutoff:
                 hits.popleft()
-            hits.append(now_ms)
+            # The oldest keys come first; stopping at the first live one keeps the sweep amortized
+            # O(1) and never drops a key with a hit still inside the window.
+            while self._hits and next(iter(self._hits.values()))[-1] <= cutoff:
+                self._hits.popitem(last=False)
+            # Concurrent calls read the clock before taking the lock, so hits can arrive out of
+            # order: keep them sorted for the expiry above.
+            if hits and hits[-1] > now_ms:
+                insort(hits, now_ms)
+            else:
+                hits.append(now_ms)
+            # One hit past the threshold is enough to know it was crossed: the newest hits are the
+            # last to expire, so the count stays exact up to there and the metric fires only once.
+            while len(hits) > self.threshold + 1:
+                hits.popleft()
+            self._hits[key] = hits
+            while len(self._hits) > self.max_keys:
+                self._hits.popitem(last=False)
             return len(hits)
 
 
