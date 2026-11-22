@@ -4,6 +4,12 @@ Tutte le modifiche rilevanti dello SDK saranno documentate in questo file.
 
 ## [Unreleased]
 
+## [0.4.8] - 2026-11-20
+
+### Fixed
+
+- **Redirect solo sulla stessa origine.** Il transport conserva host, porta effettiva e protocollo dell'endpoint iniziale prima di reinviare body e autenticazione. Cambi di dominio (compreso `www.`), porta o protocollo e URL malformati vengono rifiutati senza retry, con motivo `redirect_rejected` e diagnostica priva di URL, credenziali e body. Restano consentiti percorsi relativi, porte predefinite equivalenti e redirect interni nelle configurazioni HTTP già supportate. Per un'origine diversa occorre configurare direttamente l'endpoint corretto. (CYPY-17)
+
 ## [0.4.7] - 2026-11-20
 
 ### Fixed

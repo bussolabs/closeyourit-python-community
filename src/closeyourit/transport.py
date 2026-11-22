@@ -116,6 +116,10 @@ class _Envelope:
     body: bytes
 
 
+class _RedirectRejected(Exception):
+    """An unsafe redirect is terminal and carries no destination or payload data."""
+
+
 _FORK_REGISTRY: weakref.WeakSet[Transport] = weakref.WeakSet()
 _FORK_REGISTRY_LOCK = threading.Lock()
 _FORK_CALLBACK_REGISTERED = False
@@ -372,6 +376,10 @@ class Transport:
         for attempt in range(self._max_retries + 1):
             try:
                 response = self._post_with_redirects(url, envelope.body)
+            except _RedirectRejected:
+                logger.warning("closeyourit redirect rejected: invalid or different origin")
+                last_failure = "redirect_rejected"
+                break
             except Exception as error:
                 last_failure = f"network_error:{type(error).__name__}"
                 retryable = True
@@ -414,9 +422,20 @@ class Transport:
                 return response
             if redirect_count >= self._max_redirects:
                 return response
-            target = urljoin(current_url, location)
-            if urlsplit(target).scheme not in {"http", "https"}:
-                return response
+            # Validate before joining: urljoin can repair a malformed absolute URL into a
+            # relative path. Parsing errors must be terminal, never treated as network retries.
+            try:
+                proposed = urlsplit(location)
+                if (proposed.scheme or proposed.netloc) and not proposed.hostname:
+                    raise ValueError
+                if any(ord(character) <= 32 or ord(character) == 127 for character in location):
+                    raise ValueError
+                target = urljoin(current_url, location)
+            except ValueError:
+                raise _RedirectRejected from None
+            # Resolve relative paths against this hop, but authorize against the original URL.
+            if not self._same_authority(origin_url, target):
+                raise _RedirectRejected
             current_url = target
         return response
 
@@ -432,16 +451,25 @@ class Transport:
 
     @staticmethod
     def _same_authority(origin: str, target: str) -> bool:
-        left = urlsplit(origin)
-        right = urlsplit(target)
+        def authority(url: str) -> tuple[str, str, int]:
+            parts = urlsplit(url)
+            port = parts.port
+            if (
+                parts.scheme not in {"http", "https"}
+                or not parts.hostname
+                or parts.username is not None
+                or parts.password is not None
+                or parts.netloc.endswith(":")
+                or port == 0
+            ):
+                raise ValueError
+            default_port = 443 if parts.scheme == "https" else 80
+            return parts.scheme, parts.hostname.casefold(), default_port if port is None else port
 
-        def authority(scheme: str, hostname: str | None, port: int | None) -> tuple[str, str, int]:
-            default_port = 443 if scheme == "https" else 80
-            return scheme, (hostname or "").casefold(), port or default_port
-
-        return authority(left.scheme, left.hostname, left.port) == authority(
-            right.scheme, right.hostname, right.port
-        )
+        try:
+            return authority(origin) == authority(target)
+        except ValueError:
+            return False
 
     def _retry_delay(self, response: HttpResponse | None, attempt: int) -> float:
         if response is not None:

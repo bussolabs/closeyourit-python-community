@@ -342,11 +342,93 @@ def test_network_failure_and_timeout_are_retried_then_diagnosed() -> None:
     transport.close()
 
 
-def test_redirect_preserves_post_body_and_bearer_only_for_same_authority() -> None:
-    path = "/api/v1/projects/12345678-1234-1234-1234-123456789abc/events"
+_EVENTS_PATH = "/api/v1/projects/12345678-1234-1234-1234-123456789abc/events"
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("mixed_chain", [False, True])
+@pytest.mark.parametrize(
+    "target",
+    [
+        "https://user:password@other.example/private?token=secret",
+        "http://ingest.example.com/private",
+        "https://ingest.example.com:8443/private",
+        "https://ingest.example.com:0/private",
+        "https://ingest.example.com:-1/private",
+        "https://ingest.example.com:65536/private",
+        "https://ingest.example.com:invalid/private",
+        "https://ingest.example.com:/private",
+        "https://user:password@ingest.example.com/private",
+        "https://ingest.example.com/white space",
+        "https://ingest.example.com/line\nbreak",
+        "https://[invalid/private",
+        "https:///private",
+        "https://:443/private",
+        "https://user:password@/private",
+        "//:443/private",
+        "ftp://ingest.example.com/private",
+    ],
+)
+def test_unsafe_redirect_is_terminal_without_disclosing_data(
+    status: int, mixed_chain: bool, target: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    outcomes = [HttpResponse(status, headers={"Location": target}), HttpResponse(202)]
+    if mixed_chain:
+        outcomes.insert(0, HttpResponse(status, headers={"Location": "/safe"}))
+    requester = ScriptedRequester(*outcomes)
+    delays: list[float] = []
+    transport = Transport(
+        valid_configuration(), requester=requester, max_retries=3, sleep=delays.append
+    )
+    with caplog.at_level(logging.WARNING, logger="closeyourit"):
+        assert transport.enqueue("events", {"message": "private payload"})
+        assert transport.flush(1)
+    assert len(requester.calls) == 1 + int(mixed_chain)
+    assert all(call[1] == b'{"message":"private payload"}' for call in requester.calls)
+    assert all(call[2]["Authorization"] == "Bearer cyi_test_token" for call in requester.calls)
+    assert transport.stats.enqueued == transport.stats.failed == 1
+    assert transport.stats.sent == transport.stats.retried == transport.stats.pending == 0
+    assert transport.stats.last_failure == "redirect_rejected"
+    assert delays == []
+    assert [r.getMessage() for r in caplog.records if r.name == "closeyourit"] == [
+        "closeyourit redirect rejected: invalid or different origin",
+        "closeyourit failed 1 event(s), latest reason redirect_rejected",
+    ]
+    assert transport.close(1)
+
+
+@pytest.mark.parametrize("status", [301, 302, 303, 307, 308])
+@pytest.mark.parametrize("scheme,port", [("https", 443), ("http", 80)])
+@pytest.mark.parametrize("relative", [True, False])
+@pytest.mark.parametrize("explicit_source_port", [True, False])
+def test_same_origin_preserves_body_and_authentication(
+    status: int, scheme: str, port: int, relative: bool, explicit_source_port: bool
+) -> None:
+    source = f"{scheme}://ingest.example.com" + (f":{port}" if explicit_source_port else "")
+    target_port = "" if explicit_source_port else f":{port}"
+    target = "../next" if relative else f"{scheme}://INGEST.example.com{target_port}/next"
+    requester = ScriptedRequester(HttpResponse(status, {"Location": target}), HttpResponse(202))
+    transport = Transport(
+        valid_configuration(endpoint_url=source, environment="test"),
+        requester=requester,
+    )
+    assert transport.enqueue("events", {"message": "redirect"})
+    assert transport.flush(1)
+    first, second = requester.calls
+    expected = f"{source}/api/v1/projects/next" if relative else target
+    assert second[0] == expected
+    assert first[1] == second[1] == b'{"message":"redirect"}'
+    assert first[2] == second[2]
+    assert second[2]["Authorization"] == "Bearer cyi_test_token"
+    assert transport.stats.sent == 1
+    assert transport.stats.failed == transport.stats.retried == transport.stats.pending == 0
+    assert transport.close(1)
+
+
+def test_redirect_to_same_site_resends_post_body_and_bearer() -> None:
     requester = ScriptedRequester(
-        HttpResponse(307, headers={"location": f"https://ingest.example.com{path}?r=1"}),
-        HttpResponse(302, headers={"Location": f"https://other.example{path}"}),
+        HttpResponse(307, headers={"location": f"https://ingest.example.com{_EVENTS_PATH}?r=1"}),
+        HttpResponse(308, headers={"Location": "/api/v1/other"}),
         HttpResponse(202),
     )
     transport = Transport(valid_configuration(), requester=requester)
@@ -354,32 +436,193 @@ def test_redirect_preserves_post_body_and_bearer_only_for_same_authority() -> No
     assert transport.enqueue("events", {"message": "redirect"})
     assert transport.flush(1)
 
-    first, same_host, other_host = requester.calls
-    assert first[1] == same_host[1] == other_host[1]
+    first, same_path, other_path = requester.calls
+    assert other_path[0] == "https://ingest.example.com/api/v1/other"
+    assert first[1] == same_path[1] == other_path[1]
     assert first[2]["Authorization"] == "Bearer cyi_test_token"
-    assert same_host[2]["Authorization"] == "Bearer cyi_test_token"
-    assert "Authorization" not in other_host[2]
+    assert same_path[2]["Authorization"] == "Bearer cyi_test_token"
+    assert other_path[2]["Authorization"] == "Bearer cyi_test_token"
     assert transport.stats.sent == 1
+    assert transport.stats.failed == 0
     transport.close()
 
 
-def test_redirect_downgrade_strips_bearer_and_redirect_limit_is_bounded() -> None:
+def test_redirect_to_other_domain_fails_without_resending_or_retrying(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     requester = ScriptedRequester(
-        HttpResponse(301, headers={"Location": "http://ingest.example.com/one"}),
-        HttpResponse(308, headers={"Location": "/two"}),
-        HttpResponse(307, headers={"Location": "/three"}),
+        HttpResponse(307, headers={"location": f"https://ingest.example.com{_EVENTS_PATH}?r=1"}),
+        HttpResponse(302, headers={"Location": f"https://other.example{_EVENTS_PATH}?k=secret"}),
     )
-    transport = Transport(valid_configuration(), requester=requester, max_redirects=2)
+    transport = Transport(valid_configuration(), requester=requester, max_retries=3)
+
+    with caplog.at_level(logging.WARNING, logger="closeyourit"):
+        assert transport.enqueue("events", {"message": "redirect"})
+        assert transport.flush(1)
+
+    assert [call[0] for call in requester.calls] == [
+        f"https://ingest.example.com{_EVENTS_PATH}",
+        f"https://ingest.example.com{_EVENTS_PATH}?r=1",
+    ]
+    assert transport.stats.sent == 0
+    assert transport.stats.retried == 0
+    assert transport.stats.failed == 1
+    assert transport.stats.last_failure == "redirect_rejected"
+    messages = [record.getMessage() for record in caplog.records if record.name == "closeyourit"]
+    assert messages[0] == "closeyourit redirect rejected: invalid or different origin"
+    assert all("secret" not in message and "/api/v1" not in message for message in messages)
+    transport.close()
+
+
+def test_redirect_downgrade_to_http_is_rejected_before_anything_travels_in_clear() -> None:
+    requester = ScriptedRequester(
+        HttpResponse(301, headers={"Location": f"http://ingest.example.com{_EVENTS_PATH}"}),
+    )
+    transport = Transport(valid_configuration(), requester=requester)
 
     assert transport.enqueue("events", {"message": "redirect"})
     assert transport.flush(1)
 
-    assert len(requester.calls) == 3
-    assert "Authorization" not in requester.calls[1][2]
-    assert "Authorization" not in requester.calls[2][2]
+    assert len(requester.calls) == 1
     assert transport.stats.failed == 1
-    assert transport.stats.last_failure == "http_307"
+    assert transport.stats.last_failure == "redirect_rejected"
     transport.close()
+
+
+def test_redirect_to_other_port_on_same_host_is_rejected() -> None:
+    requester = ScriptedRequester(
+        HttpResponse(307, headers={"Location": f"https://ingest.example.com:8443{_EVENTS_PATH}"}),
+    )
+    transport = Transport(valid_configuration(), requester=requester)
+
+    assert transport.enqueue("events", {"message": "redirect"})
+    assert transport.flush(1)
+
+    assert len(requester.calls) == 1
+    assert transport.stats.failed == 1
+    assert transport.stats.last_failure == "redirect_rejected"
+    transport.close()
+
+
+def test_redirect_www_swap_is_rejected() -> None:
+    requester = ScriptedRequester(
+        HttpResponse(308, headers={"Location": f"https://www.ingest.example.com{_EVENTS_PATH}"}),
+        HttpResponse(307, headers={"Location": f"https://evil.example{_EVENTS_PATH}"}),
+    )
+    transport = Transport(valid_configuration(), requester=requester)
+
+    assert transport.enqueue("events", {"message": "redirect"})
+    assert transport.flush(1)
+
+    assert len(requester.calls) == 1
+    assert transport.stats.failed == 1
+    assert transport.stats.last_failure == "redirect_rejected"
+    transport.close()
+
+
+def test_redirect_chain_is_measured_against_the_starting_address() -> None:
+    # A permitted first hop cannot authorize a different host on the second hop.
+    requester = ScriptedRequester(
+        HttpResponse(302, headers={"Location": "https://ingest.example.com/one"}),
+        HttpResponse(302, headers={"Location": "https://www.www.ingest.example.com/two"}),
+    )
+    transport = Transport(valid_configuration(), requester=requester)
+
+    assert transport.enqueue("events", {"message": "redirect"})
+    assert transport.flush(1)
+
+    assert len(requester.calls) == 2
+    assert transport.stats.last_failure == "redirect_rejected"
+    transport.close()
+
+
+def test_redirect_upgrade_to_https_is_rejected() -> None:
+    configuration = valid_configuration(
+        endpoint_url="http://localhost:3011", environment="development"
+    )
+    requester = ScriptedRequester(
+        HttpResponse(308, headers={"Location": f"https://localhost:3011{_EVENTS_PATH}"}),
+        HttpResponse(202),
+    )
+    transport = Transport(configuration, requester=requester)
+
+    assert transport.enqueue("events", {"message": "redirect"})
+    assert transport.flush(1)
+
+    assert len(requester.calls) == 1
+    assert transport.stats.sent == 0
+    assert transport.stats.last_failure == "redirect_rejected"
+    transport.close()
+
+
+def test_redirect_chain_from_http_stops_before_reaching_https() -> None:
+    configuration = valid_configuration(
+        endpoint_url="http://localhost:3011", environment="development"
+    )
+    requester = ScriptedRequester(
+        HttpResponse(308, headers={"Location": "https://localhost:3011/one"}),
+        HttpResponse(307, headers={"Location": "http://localhost:3011/two"}),
+        HttpResponse(202),
+    )
+    transport = Transport(configuration, requester=requester, max_redirects=3)
+
+    assert transport.enqueue("events", {"message": "redirect"})
+    assert transport.flush(1)
+
+    assert [call[0] for call in requester.calls] == [
+        f"http://localhost:3011{_EVENTS_PATH}",
+    ]
+    assert transport.stats.sent == 0
+    assert transport.stats.retried == 0
+    assert transport.stats.failed == 1
+    assert transport.stats.last_failure == "redirect_rejected"
+    transport.close()
+
+
+@pytest.mark.parametrize("limit", [0, 1, 2])
+def test_redirect_limit_is_bounded_on_the_same_site(limit: int) -> None:
+    requester = ScriptedRequester(
+        HttpResponse(301, headers={"Location": "/one"}),
+        HttpResponse(308, headers={"Location": "/two"}),
+        HttpResponse(307, headers={"Location": "/three"}),
+    )
+    transport = Transport(valid_configuration(), requester=requester, max_redirects=limit)
+
+    assert transport.enqueue("events", {"message": "redirect"})
+    assert transport.flush(1)
+
+    assert len(requester.calls) == limit + 1
+    assert all(call[1] == requester.calls[0][1] for call in requester.calls)
+    assert all(call[2]["Authorization"] == "Bearer cyi_test_token" for call in requester.calls)
+    assert transport.stats.failed == 1
+    assert transport.stats.last_failure == f"http_{(301, 308, 307)[limit]}"
+    assert transport.stats.retried == transport.stats.pending == 0
+    transport.close()
+
+
+@pytest.mark.parametrize(
+    ("origin", "target", "allowed"),
+    [
+        ("https://ingest.example.com/a", "https://ingest.example.com/b", True),
+        ("https://ingest.example.com/a", "https://INGEST.example.com:443/b", True),
+        ("https://ingest.example.com/a", "https://www.ingest.example.com/b", False),
+        ("https://www.ingest.example.com/a", "https://ingest.example.com/b", False),
+        ("https://ingest.example.com:8443/a", "https://www.ingest.example.com:8443/b", False),
+        ("http://ingest.example.com/a", "https://ingest.example.com/b", False),
+        ("http://ingest.example.com/a", "http://ingest.example.com:80/b", True),
+        ("http://[::1]:3011/a", "http://[::1]:3011/b", True),
+        ("https://ingest.example.com/a", "http://ingest.example.com/b", False),
+        ("https://ingest.example.com/a", "https://other.example/b", False),
+        ("https://ingest.example.com/a", "https://ingest.example.com.evil/b", False),
+        ("https://ingest.example.com/a", "https://ingest.example.com:8443/b", False),
+        ("http://ingest.example.com/a", "https://ingest.example.com:8443/b", False),
+        ("https://ingest.example.com/a", "https://www.www.ingest.example.com/b", False),
+        ("https://ingest.example.com/a", "ftp://ingest.example.com/b", False),
+        ("https://ingest.example.com/a", "https://ingest.example.com:99999/b", False),
+    ],
+)
+def test_redirect_requires_the_same_authority(origin: str, target: str, allowed: bool) -> None:
+    assert Transport._same_authority(origin, target) is allowed
 
 
 def test_flush_timeout_and_close_are_idempotent_and_reject_new_work() -> None:
